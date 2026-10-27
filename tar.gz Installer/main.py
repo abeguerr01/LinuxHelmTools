@@ -3,11 +3,18 @@ from tkinter import filedialog as fd
 from tkinter import messagebox
 
 import os
+import queue
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 ruta: str = ""
 extraido: str = ""  # nombre real creado dentro de /opt/
+
+# Los hilos de trabajo dejan aquí lo que la interfaz debe pintar
+cola: queue.Queue[Callable[[], None]] = queue.Queue()
 
 # El logo vive junto a este script, no en el directorio de trabajo
 RUTA_LOGO: Path = Path(__file__).resolve().parent / "AppLogo.png"
@@ -28,11 +35,62 @@ btn_deshacer: tk.Button
 etiquetaConfirCond: tk.Label
 
 #region Funciones
+# ----- Hilos e interfaz -----
 def error_de(resultado: subprocess.CompletedProcess[bytes]) -> str:
     """stderr legible, sin tronar si trae bytes inválidos."""
     return resultado.stderr.decode(errors="replace")
 
 
+def _programar(accion: Callable[[], None]) -> None:
+    """Deja una acción en cola para que la ejecute el hilo de Tk.
+
+    Tk solo es seguro desde su propio hilo, así que los hilos de trabajo
+    jamás tocan widgets: encolan, y la cola se vacía en el hilo principal.
+    """
+    cola.put(accion)
+
+
+def _drenar_cola() -> None:
+    """Ejecuta lo que hayan dejado los hilos. Se replanifica sola."""
+    while True:
+        try:
+            accion = cola.get_nowait()
+        except queue.Empty:
+            break
+        accion()
+    ventana.after(50, _drenar_cola)
+
+
+def _en_hilo(funcion: Callable[[], tuple[str, bool]],
+             al_terminar: Callable[[str, bool], None]) -> None:
+    """Ejecuta `funcion()` en un hilo y entrega su resultado a la interfaz.
+
+    `funcion` corre fuera del bucle de Tk (la ventana sigue viva);
+    `al_terminar(mensaje, exito)` se llama siempre en el hilo de Tk.
+    """
+    def trabajo() -> None:
+        try:
+            mensaje, exito = funcion()
+        except Exception as exc:  # un hilo muerto en silencio no avisa de nada
+            mensaje, exito = f"✗ Error: {exc}", False
+        _programar(lambda: al_terminar(mensaje, exito))
+
+    threading.Thread(target=trabajo, daemon=True).start()
+
+
+def _bloquear_botones(ocupar: bool) -> None:
+    """Deshabilita los botones mientras hay trabajo.
+
+    Antes lo impedía el propio bloqueo de la ventana; al quitarlo hay que
+    evitar dobles clics (dos 'pkexec tar' a la vez estropearían /opt/).
+    """
+    estado = tk.DISABLED if ocupar else tk.NORMAL
+    boton.config(state=estado)
+    btn_abrir.config(state=estado)
+    btn_deshacer.config(state=estado)
+
+
+# ----- Lógica de instalación -----
 def base_extraida() -> str:
     """Fallback: "app.tar.gz" -> "app"."""
     nombre = ruta.split("/")[-1]
@@ -71,7 +129,7 @@ def binario() -> Path | None:
 
 
 def logo_del_app() -> Path | None:
-    """Imagen que trae el propio programa en /opt/<extraido>/, o None si no trae."""
+    """Imagen que trae el propio programa en /opt/<extraido>/ o None si no trae."""
     carpeta = Path("/opt") / extraido
     if not carpeta.is_dir():
         return None
@@ -91,18 +149,9 @@ def logo_del_app() -> Path | None:
     return imagenes[0]
 
 
-def ejecutar() -> None:
-    """Pide un .tar.gz, lo extrae en /opt/ y ofrece ejecutarlo o deshacerlo."""
-    global frame_seccion, ruta
-
-    ruta = fd.askopenfilename(
-        title="Abrir",
-        initialdir="/home",
-        filetypes=[(".tar.gz", "*.tar.gz"), ("All", "*.*")]
-    )
-    if not ruta:
-        return
-
+# ----- Trabajos (van en hilo, no tocan la interfaz) -----
+def _trabajo_extraer() -> tuple[str, bool]:
+    """Comprueba el índice y extrae el .tar.gz en /opt/."""
     detectar_extraido()
 
     resultado = subprocess.run(
@@ -112,48 +161,103 @@ def ejecutar() -> None:
     )
 
     if resultado.returncode == 0:
-        etiquetaConfir.config(text="✓ Extracted in /opt/")
+        return "✓ Extracted in /opt/", True
+    return "✗ Error: " + error_de(resultado), False
+
+
+def _trabajo_abrir() -> tuple[str, bool]:
+    """Lanza el programa instalado sin esperar a que termine."""
+    ejecutable = binario()
+    if ejecutable is None:
+        return f"✗ No executable found in /opt/{extraido}", False
+
+    try:
+        proceso = subprocess.Popen(
+            [str(ejecutable)],
+            cwd=str(ejecutable.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return f"✗ Error: {exc}", False
+
+    # Solo bloquea este hilo: da tiempo a coger un arranque fallido
+    time.sleep(0.3)
+    if proceso.poll() is not None and proceso.returncode != 0:
+        return f"✗ Error: {ejecutable.name} exited with code {proceso.returncode}", False
+    return f"✓ {ejecutable.name} executed!!!", True
+
+
+def _trabajo_deshacer() -> tuple[str, bool]:
+    """Borra de /opt/ lo extraído y su lanzador .desktop."""
+    nombre = extraido
+
+    resultado = subprocess.run(
+        ["pkexec", "rm", "-rf", f"/opt/{nombre}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    if resultado.returncode == 0:
+        lanzador = Path.home() / ".local" / "share" / "applications" / f"{nombre}.desktop"
+        lanzador.unlink(missing_ok=True)
+        return f"✓ {nombre} deleted", True
+    return "✗ Error: " + error_de(resultado), False
+
+
+# ----- Callbacks de la interfaz (van en el hilo de Tk) -----
+def ejecutar() -> None:
+    """Pide un .tar.gz, lo extrae en /opt/ y ofrece ejecutarlo o deshacerlo."""
+    global ruta
+
+    ruta = fd.askopenfilename(
+        title="Abrir",
+        initialdir="/home",
+        filetypes=[(".tar.gz", "*.tar.gz"), ("All", "*.*")]
+    )
+    if not ruta:
+        return
+
+    _bloquear_botones(True)
+    etiquetaConfir.config(text="⏳ Extracting, please wait...")
+    _en_hilo(_trabajo_extraer, _extraer_terminado)
+
+
+def _extraer_terminado(mensaje: str, exito: bool) -> None:
+    _bloquear_botones(False)
+    etiquetaConfir.config(text=mensaje)
+    if exito:
         frame_seccion.pack()
         dot_desktop()  # Verificamos si tiene .desktop
     else:
-        etiquetaConfir.config(text="✗ Error: " + error_de(resultado))
         frame_seccion.pack_forget()
 
 
 def abrir() -> None:
     """Ejecuta el binario instalado en /opt/<extraido>/."""
-    ejecutable = binario()
-    if ejecutable is None:
-        etiquetaConfirCond.config(text="✗ No executable found in /opt/" + extraido)
-        return
+    _bloquear_botones(True)
+    etiquetaConfirCond.config(text="⏳ Executing...")
+    _en_hilo(_trabajo_abrir, _abrir_terminado)
 
-    resultado = subprocess.run(
-        [str(ejecutable)],
-        cwd=str(ejecutable.parent),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
 
-    if resultado.returncode == 0:
-        etiquetaConfirCond.config(text=f"✓ {ejecutable.name} executed!!!")
-    else:
-        etiquetaConfirCond.config(text="✗ Error: " + error_de(resultado))
+def _abrir_terminado(mensaje: str, _exito: bool) -> None:
+    _bloquear_botones(False)
+    etiquetaConfirCond.config(text=mensaje)
 
 
 def deshacer() -> None:
     """Borra de /opt/ lo que se extrajo y elimina su lanzador .desktop."""
-    resultado = subprocess.run(
-        ["pkexec", "rm", "-rf", f"/opt/{extraido}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+    _bloquear_botones(True)
+    etiquetaConfirCond.config(text="⏳ Deleting...")
+    _en_hilo(_trabajo_deshacer, _deshacer_terminado)
 
-    if resultado.returncode == 0:
-        etiquetaConfirCond.config(text=f"✓ {extraido} deleted")
-        (Path.home() / ".local" / "share" / "applications" / f"{extraido}.desktop").unlink(missing_ok=True)
+
+def _deshacer_terminado(mensaje: str, exito: bool) -> None:
+    _bloquear_botones(False)
+    etiquetaConfirCond.config(text=mensaje)
+    if exito:
         frame_seccion.pack()
     else:
-        etiquetaConfirCond.config(text="✗ Error: " + error_de(resultado))
         frame_seccion.pack_forget()
 
 
@@ -227,6 +331,9 @@ def crear_ventana() -> None:
 
     # No se llama frame_seccion.pack() → nace oculta
     # ==================================
+
+    # Arranca el vaciado de la cola: por aquí entra todo lo que piden los hilos
+    ventana.after(50, _drenar_cola)
 
     ventana.mainloop()
 
