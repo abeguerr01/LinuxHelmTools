@@ -15,6 +15,7 @@ build/
 dist/
 sdist/
 wheels/
+*.spec
 *.egg-info/
 .installed.cfg
 *.egg
