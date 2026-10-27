@@ -1,0 +1,66 @@
+# =====================================================================
+#  Python
+# =====================================================================
+
+# Byte-compiled / optimised / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# =====================================================================
+#  Entorno y secretos
+# =====================================================================
+.env
+.env.*
+!.env.example
+
+# =====================================================================
+#  Testing / linting / tipado
+# =====================================================================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# =====================================================================
+#  Editores y sistemas
+# =====================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =====================================================================
+#  Artefactos locales de ESTE proyecto
+# =====================================================================
+# Los .tar.gz son la *entrada* del programa, no su código.
+# Si alguna vez quieres versionar uno:  git add -f <fichero>
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tar.xz
