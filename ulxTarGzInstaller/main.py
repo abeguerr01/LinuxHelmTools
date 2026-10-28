@@ -39,10 +39,28 @@ cola: queue.Queue[Callable[[], None]] = queue.Queue()
 # El logo vive junto a este script, no en el directorio de trabajo
 RUTA_LOGO: Path = Path(__file__).resolve().parent / "AppLogo.png"
 RUTA_LOGO_GENERICO: Path = Path(__file__).resolve().parent / "TarGzLogo.png"
-logo: tk.PhotoImage | None = None  # referencia para que Tkinter no lo recoja (GC)
+logo: tk.PhotoImage | None = None        # icono de la ventana (GC de Tk)
+logo_cabecera: tk.PhotoImage | None = None  # logo pequeño de la cabecera (GC de Tk)
 
 # Formatos que sirven como icono de escritorio
 EXTENSIONES_LOGO: set[str] = {".png", ".svg", ".ico", ".xpm", ".bmp", ".webp"}
+
+# ----- Paleta: gris claro de fondo, azul para resaltar -----
+FONDO: str = "#eef1f6"        # gris claro (fondo de la ventana)
+TARJETA: str = "#ffffff"      # tarjeta blanca encima del gris
+BORDE: str = "#d7dee7"        # borde suave de las tarjetas
+AZUL: str = "#1f6fd0"         # azul principal: títulos y botones
+AZUL_HOVER: str = "#1759ab"   # azul más oscuro al pasar el ratón
+AZUL_CLARO: str = "#dceafd"   # azul muy claro, para acentos
+TEXTO: str = "#26313d"        # texto normal
+TEXTO_SUAVE: str = "#6a7887"  # texto secundario
+GRIS_BOTON: str = "#dde3ea"   # botón deshabilitado
+VERDE: str = "#1a8a3c"        # mensajes de éxito
+ROJO: str = "#c62828"         # mensajes de error
+AMBAR: str = "#b26a00"        # avisos
+
+# Color de cada mensaje según su primer símbolo
+COLORES_MENSAJE: dict[str, str] = {"✓": VERDE, "✗": ROJO, "⚠": AMBAR, "⏳": AZUL}
 
 # Widgets creados por crear_ventana() y usados después por los callbacks
 ventana: tk.Tk
@@ -59,6 +77,47 @@ etiquetaConfirCond: tk.Label
 def error_de(resultado: subprocess.CompletedProcess[bytes]) -> str:
     """stderr legible, sin tronar si trae bytes inválidos."""
     return resultado.stderr.decode(errors="replace")
+
+
+def _poner_mensaje(etiqueta: tk.Label, texto: str) -> None:
+    """Muestra un mensaje con color según su resultado.
+
+    ✓ verde (éxito), ✗ rojo (error), ⏳ azul (en marcha), ⚠ ámbar (aviso).
+    """
+    etiqueta.config(text=texto, fg=COLORES_MENSAJE.get(texto[:1], TEXTO))
+
+
+def _boton(parent: tk.Widget, texto: str, comando: Callable[[], None],
+           primario: bool = True) -> tk.Button:
+    """Botón plano: azul con letra blanca (primario) o blanco con letra y
+    borde azul (secundario). El color lo mantiene _bloquear_botones().
+
+    El secundario usa el "highlight ring" de Tk en vez de relief, porque
+    Tk dibuja relief='solid' en negro y no en el color que le digas.
+    """
+    if primario:
+        return tk.Button(parent, text=texto, command=comando, bg=AZUL, fg="white",
+                         activebackground=AZUL_HOVER, activeforeground="white",
+                         relief="flat", bd=0, highlightthickness=0,
+                         font=("Arial", 11, "bold"),
+                         padx=20, pady=7, cursor="hand2")
+    return tk.Button(parent, text=texto, command=comando, bg=TARJETA, fg=AZUL,
+                     activebackground=AZUL_CLARO, activeforeground=AZUL_HOVER,
+                     relief="flat", bd=0, highlightthickness=1,
+                     highlightbackground=AZUL, highlightcolor=AZUL_HOVER,
+                     font=("Arial", 11), padx=16, pady=6, cursor="hand2")
+
+
+def _mini_logo() -> tk.PhotoImage | None:
+    """Logo reducido a ~30 px para la cabecera, o None si no hay."""
+    if not RUTA_LOGO.exists():
+        return None
+    try:
+        original = tk.PhotoImage(file=str(RUTA_LOGO))
+        factor = max(1, original.width() // 30)
+        return original.subsample(factor, factor)
+    except tk.TclError:   # Tk sin soporte de reducción: se prescinde del logo
+        return None
 
 
 def _programar(accion: Callable[[], None]) -> None:
@@ -103,11 +162,21 @@ def _bloquear_botones(ocupar: bool) -> None:
 
     Antes lo impedía el propio bloqueo de la ventana; al quitarlo hay que
     evitar dobles clics (dos 'pkexec tar' a la vez estropearían la instalación).
+    Además, el botón deshabilitado se pone gris para que se note.
     """
     estado = tk.DISABLED if ocupar else tk.NORMAL
-    boton.config(state=estado)
-    btn_abrir.config(state=estado)
-    btn_deshacer.config(state=estado)
+    # (widget, color de fondo libre, color de letra libre, color de su anillo)
+    for widget, fondo, letra, anillo in (
+        (boton, AZUL, "white", GRIS_BOTON),
+        (btn_abrir, AZUL, "white", GRIS_BOTON),
+        (btn_deshacer, TARJETA, AZUL, AZUL),
+    ):
+        if ocupar:
+            widget.config(state=estado, bg=GRIS_BOTON, fg=TEXTO_SUAVE,
+                          highlightbackground=GRIS_BOTON)
+        else:
+            widget.config(state=estado, bg=fondo, fg=letra,
+                          highlightbackground=anillo)
 
 
 # ----- Análisis del .tar.gz (sin privilegios) -----
@@ -487,14 +556,14 @@ def ejecutar() -> None:
 
     ejecutable_elegido = None
     _bloquear_botones(True)
-    etiquetaConfir.config(text="⏳ Checking the package...")
+    _poner_mensaje(etiquetaConfir, "⏳ Checking the package...")
     _en_hilo(_trabajo_preparar, _preparar_terminado)
 
 
 def _preparar_terminado(mensaje: str, exito: bool) -> None:
     if not exito:
         _bloquear_botones(False)
-        etiquetaConfir.config(text=mensaje)
+        _poner_mensaje(etiquetaConfir, mensaje)
         return
 
     if ya_instalado:
@@ -505,18 +574,18 @@ def _preparar_terminado(mensaje: str, exito: bool) -> None:
         )
         if not respuesta:
             _bloquear_botones(False)
-            etiquetaConfir.config(text="✗ Cancelled, nothing changed")
+            _poner_mensaje(etiquetaConfir, "✗ Cancelled, nothing changed")
             return
 
-    etiquetaConfir.config(text="⏳ Extracting, please wait...")
+    _poner_mensaje(etiquetaConfir, "⏳ Extracting, please wait...")
     _en_hilo(_trabajo_extraer, _extraer_terminado)
 
 
 def _extraer_terminado(mensaje: str, exito: bool) -> None:
     _bloquear_botones(False)
-    etiquetaConfir.config(text=mensaje)
+    _poner_mensaje(etiquetaConfir, mensaje)
     if exito:
-        frame_seccion.pack()
+        frame_seccion.pack(fill=tk.X)
         configurar_lanzador()
     else:
         frame_seccion.pack_forget()
@@ -525,19 +594,19 @@ def _extraer_terminado(mensaje: str, exito: bool) -> None:
 def abrir() -> None:
     """Ejecuta el binario instalado en /opt/<extraido>/."""
     _bloquear_botones(True)
-    etiquetaConfirCond.config(text="⏳ Executing...")
+    _poner_mensaje(etiquetaConfirCond, "⏳ Executing...")
     _en_hilo(_trabajo_abrir, _abrir_terminado)
 
 
 def _abrir_terminado(mensaje: str, _exito: bool) -> None:
     _bloquear_botones(False)
-    etiquetaConfirCond.config(text=mensaje)
+    _poner_mensaje(etiquetaConfirCond, mensaje)
 
 
 def deshacer() -> None:
     """Borra de /opt/ lo que se extrajo y elimina su lanzador .desktop."""
     _bloquear_botones(True)
-    etiquetaConfirCond.config(text="⏳ Deleting...")
+    _poner_mensaje(etiquetaConfirCond, "⏳ Deleting...")
     _en_hilo(_trabajo_deshacer, _deshacer_terminado)
 
 
@@ -546,9 +615,9 @@ def _deshacer_terminado(mensaje: str, exito: bool) -> None:
     _bloquear_botones(False)
     if exito:
         ejecutable_elegido = None
-    etiquetaConfirCond.config(text=mensaje)
+    _poner_mensaje(etiquetaConfirCond, mensaje)
     if exito:
-        frame_seccion.pack()
+        frame_seccion.pack(fill=tk.X)
     else:
         frame_seccion.pack_forget()
 
@@ -560,7 +629,7 @@ def configurar_lanzador() -> None:
 
     eleccion = dialogo_lanzador()
     if eleccion is None:
-        etiquetaConfirCond.config(text="⚠ Installed, but no launcher created")
+        _poner_mensaje(etiquetaConfirCond, "⚠ Installed, but no launcher created")
         return
 
     ejecutable, terminal, lineas_paquete = eleccion
@@ -568,10 +637,10 @@ def configurar_lanzador() -> None:
     try:
         escrito = escribir_desktop(ejecutable, terminal, lineas_paquete)
     except OSError as exc:
-        etiquetaConfirCond.config(text=f"✗ Error: {exc}")
+        _poner_mensaje(etiquetaConfirCond, f"✗ Error: {exc}")
         return
 
-    etiquetaConfirCond.config(text=f"✓ Launcher created: {escrito.name}")
+    _poner_mensaje(etiquetaConfirCond, f"✓ Launcher created: {escrito.name}")
 
 
 def dialogo_lanzador() -> tuple[Path, bool, list[str]] | None:
@@ -590,6 +659,7 @@ def dialogo_lanzador() -> tuple[Path, bool, list[str]] | None:
     dlg = tk.Toplevel(ventana)
     dlg.title("Create launcher")
     dlg.resizable(False, False)
+    dlg.configure(bg=FONDO)
     dlg.transient(ventana)
     dlg.grab_set()
 
@@ -597,17 +667,27 @@ def dialogo_lanzador() -> tuple[Path, bool, list[str]] | None:
     terminal = tk.BooleanVar(value=terminal_inicial)
     resultado: list[tuple[Path, bool, list[str]]] = []
 
-    marco = tk.Frame(dlg, padx=16, pady=14)
-    marco.pack(fill=tk.BOTH, expand=True)
+    # Cabecera azul con el título
+    cabecera = tk.Frame(dlg, bg=AZUL, padx=16, pady=8)
+    cabecera.pack(fill=tk.X)
+    tk.Label(cabecera, text="Create launcher", font=("Arial", 12, "bold"),
+             bg=AZUL, fg="white").pack(anchor="w")
+
+    # Tarjeta blanca con el contenido
+    marco = tk.Frame(dlg, bg=TARJETA, padx=18, pady=16,
+                     highlightbackground=BORDE, highlightthickness=1)
+    marco.pack(padx=14, pady=(10, 14), fill=tk.BOTH, expand=True)
 
     if exec_original:
         tk.Label(marco, text=f"The package brings its own launcher (Exec={exec_original})",
-                 font=("Arial", 9), fg="#666").pack(anchor="w")
+                 font=("Arial", 9), bg=TARJETA, fg=TEXTO_SUAVE,
+                 justify="left", wraplength=360).pack(anchor="w")
     tk.Label(marco, text=f"Install: {dir_instalacion()}",
-             font=("Arial", 11, "bold")).pack(anchor="w", pady=(6, 0))
+             font=("Arial", 11, "bold"), bg=TARJETA, fg=AZUL).pack(anchor="w", pady=(8, 0))
 
-    tk.Label(marco, text="Executable:").pack(anchor="w", pady=(12, 2))
-    fila = tk.Frame(marco)
+    tk.Label(marco, text="Executable:", font=("Arial", 10, "bold"),
+             bg=TARJETA, fg=TEXTO).pack(anchor="w", pady=(14, 4))
+    fila = tk.Frame(marco, bg=TARJETA)
     fila.pack(fill=tk.X)
 
     combo = ttk.Combobox(fila, textvariable=seleccion, state="readonly",
@@ -624,13 +704,17 @@ def dialogo_lanzador() -> tuple[Path, bool, list[str]] | None:
                 combo["values"] = valores
             seleccion.set(elegida)
 
-    tk.Button(fila, text="...", width=3, command=examinar).pack(side=tk.LEFT, padx=(6, 0))
+    _boton(fila, "...", examinar, primario=False).pack(side=tk.LEFT, padx=(6, 0))
 
     tk.Checkbutton(marco, text="Run in a terminal (console application)",
-                   variable=terminal).pack(anchor="w", pady=(12, 0))
+                   variable=terminal, bg=TARJETA, fg=TEXTO, font=("Arial", 10),
+                   activebackground=TARJETA, activeforeground=AZUL,
+                   selectcolor=AZUL_CLARO, cursor="hand2").pack(anchor="w", pady=(14, 0))
 
-    botones = tk.Frame(marco)
-    botones.pack(fill=tk.X, pady=(16, 0))
+    tk.Frame(marco, height=1, bg=BORDE).pack(fill=tk.X, pady=(16, 0))
+
+    botones = tk.Frame(marco, bg=TARJETA)
+    botones.pack(fill=tk.X, pady=(14, 0))
 
     def aceptar() -> None:
         elegido = seleccion.get()
@@ -642,8 +726,14 @@ def dialogo_lanzador() -> tuple[Path, bool, list[str]] | None:
     def omitir() -> None:
         dlg.destroy()
 
-    tk.Button(botones, text="Create launcher", command=aceptar).pack(side=tk.RIGHT)
-    tk.Button(botones, text="Skip", command=omitir).pack(side=tk.RIGHT, padx=(0, 8))
+    _boton(botones, "Create launcher", aceptar).pack(side=tk.RIGHT)
+    _boton(botones, "Skip", omitir, primario=False).pack(side=tk.RIGHT, padx=(0, 8))
+
+    # Centrado sobre la ventana principal
+    dlg.update_idletasks()
+    x = ventana.winfo_rootx() + max(0, (ventana.winfo_width() - dlg.winfo_width()) // 2)
+    y = ventana.winfo_rooty() + max(0, (ventana.winfo_height() - dlg.winfo_height()) // 2)
+    dlg.geometry(f"+{x}+{y}")
 
     dlg.wait_window()
     return resultado[0] if resultado else None
@@ -655,38 +745,75 @@ def crear_ventana() -> None:
     """Construye la interfaz y entra en el bucle principal."""
     global ventana, etiqueta, etiquetaConfir, boton
     global frame_seccion, btn_abrir, btn_deshacer, etiquetaConfirCond, logo
+    global logo_cabecera
 
     ventana = tk.Tk()
     ventana.title(".tar.gz INSTALLER")
-    ventana.geometry("440x300")
+    ventana.configure(bg=FONDO)
+    ventana.resizable(False, False)
 
     if RUTA_LOGO.exists():
         logo = tk.PhotoImage(file=str(RUTA_LOGO))
         ventana.iconphoto(True, logo)
 
-    etiqueta = tk.Label(ventana, text="Select a file .tar.gz", font=("Arial", 14))
-    etiqueta.pack(pady=20)
+    # ===== CABECERA AZUL =====
+    cabecera = tk.Frame(ventana, bg=AZUL, padx=16, pady=10)
+    cabecera.pack(fill=tk.X)
+    logo_cabecera = _mini_logo()
+    if logo_cabecera is not None:
+        tk.Label(cabecera, image=logo_cabecera, bg=AZUL).pack(
+            side=tk.LEFT, padx=(0, 10))
+    tk.Label(cabecera, text=".tar.gz INSTALLER", font=("Arial", 15, "bold"),
+             bg=AZUL, fg="white").pack(side=tk.LEFT)
 
-    etiquetaConfir = tk.Label(ventana, text="", font=("Arial", 14))
-    etiquetaConfir.pack(pady=20)
+    # ===== TARJETA BLANCA =====
+    tarjeta = tk.Frame(ventana, bg=TARJETA, highlightbackground=BORDE,
+                       highlightthickness=1, padx=26, pady=22)
+    tarjeta.pack(padx=18, pady=18, fill=tk.BOTH, expand=True)
 
-    boton = tk.Button(ventana, text="Search", command=ejecutar)
-    boton.pack(pady=10)
+    etiqueta = tk.Label(tarjeta, text="Select a file .tar.gz",
+                        font=("Arial", 15, "bold"), bg=TARJETA, fg=AZUL)
+    etiqueta.pack()
+
+    etiquetaConfir = tk.Label(tarjeta, text="", font=("Arial", 10), bg=TARJETA,
+                              fg=TEXTO, wraplength=340, justify="center")
+    etiquetaConfir.pack(pady=(14, 16))
+
+    boton = _boton(tarjeta, "Search", ejecutar)
+    boton.pack()
 
     # ===== SECCIÓN CONDICIONAL =====
-    frame_seccion = tk.Frame(ventana)
+    frame_seccion = tk.Frame(tarjeta, bg=TARJETA)
+    tk.Frame(frame_seccion, height=1, bg=BORDE).pack(fill=tk.X, pady=(18, 0))
 
-    btn_abrir = tk.Button(frame_seccion, text="Execute", command=abrir)
-    btn_abrir.pack(side=tk.LEFT, padx=10, pady=10)
+    # ancho natural -> la fila de botones se centra bajo el separador ancho
+    fila_botones = tk.Frame(frame_seccion, bg=TARJETA)
+    fila_botones.pack(pady=(12, 0))
 
-    btn_deshacer = tk.Button(frame_seccion, text="return", command=deshacer)
-    btn_deshacer.pack(side=tk.LEFT, padx=10, pady=10)
+    btn_abrir = _boton(fila_botones, "Execute", abrir)
+    btn_abrir.pack(side=tk.LEFT)
 
-    etiquetaConfirCond = tk.Label(frame_seccion, text="", font=("Arial", 14))
-    etiquetaConfirCond.pack(side=tk.TOP, fill=tk.X, pady=10)
+    btn_deshacer = _boton(fila_botones, "return", deshacer, primario=False)
+    btn_deshacer.pack(side=tk.LEFT, padx=(10, 0))
 
-    # No se llama frame_seccion.pack() → nace oculta
+    etiquetaConfirCond = tk.Label(frame_seccion, text="", font=("Arial", 10),
+                                  bg=TARJETA, fg=TEXTO, wraplength=340,
+                                  justify="center")
+    etiquetaConfirCond.pack(fill=tk.X, pady=(12, 0))
+
+    # No se llama frame_seccion.pack(fill=tk.X) → nace oculta
     # ==================================
+
+    # Pie de la tarjeta: qué hace la app y por qué pide privilegios
+    tk.Label(tarjeta, text="Installs into /opt/ · asks for administrator access",
+             font=("Arial", 9), bg=TARJETA, fg=TEXTO_SUAVE).pack(
+        side=tk.BOTTOM, pady=(18, 0))
+
+    # Tamaño fijo y centrada en pantalla
+    ancho, alto = 470, 350
+    x = (ventana.winfo_screenwidth() - ancho) // 2
+    y = (ventana.winfo_screenheight() - alto) // 2
+    ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
 
     # Arranca el vaciado de la cola: por aquí entra todo lo que piden los hilos
     ventana.after(50, _drenar_cola)
