@@ -33,10 +33,20 @@ for fichero in main.py AppLogo.png TarGzLogo.png; do
   fi
 done
 
+# --- intérprete: el del SISTEMA, no el de uv ---------------------------------
+# El Python de uv trae un Tk 9 sin fontconfig/Xft: no resuelve 'Arial' y todo
+# sale con la fuente monoespaciada 'fixed'. El Tk 8.6 del sistema sí (Liberation
+# Sans), así que el binario queda idéntico a como se ve main.py.
+PYTHON=$(command -v python3)
+if ! "$PYTHON" -c "import tkinter" 2>/dev/null; then
+  echo "✗ $PYTHON no tiene tkinter (paquete python3-tk): no se puede compilar" >&2
+  exit 1
+fi
+
 # --- cómo lanzar PyInstaller (sin instalar nada fijo en el sistema) ---
 if command -v uv >/dev/null 2>&1; then
   # --no-project: que uv NO intente sincronizar un pyproject.toml del padre
-  LANZADOR=(uv run --no-project --with pyinstaller pyinstaller)
+  LANZADOR=(uv run --no-project --python "$PYTHON" --with pyinstaller pyinstaller)
 elif python3 -c "import PyInstaller" >/dev/null 2>&1; then
   LANZADOR=(python3 -m PyInstaller)
 elif command -v pyinstaller >/dev/null 2>&1; then

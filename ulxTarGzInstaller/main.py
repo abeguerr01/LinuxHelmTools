@@ -248,6 +248,10 @@ def analizar() -> tuple[str, bool]:
         extraido = base_extraida()
         if not extraido or extraido in (".", ".."):
             return "✗ Cannot tell where to install this archive", False
+        if extraido in RAICES_SISTEMA:
+            # p. ej. un "bin.tar.gz" con estructura contenida no debe acabar
+            # creando (y en "return" borrando) /opt/bin
+            extraido += "_app"
         comando_tar = ["--no-same-owner", "--no-same-permissions",
                        "-xzf", ruta, "-C", str(RAIZ_OPT) + "/",
                        f"--one-top-level={extraido}"]
