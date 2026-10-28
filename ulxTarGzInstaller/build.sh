@@ -6,19 +6,25 @@
 #   ./build.sh
 #
 # Resultado:
-#   dist/ulxTarGzInstaller/ulxTarGzInstaller   <- el binario
-#   dist/ulxTarGzInstaller/_internal/          <- soportes, incluidos los 2 PNG
+#   dist/ulxTarGzInstaller   <- UN único binario autocontenido: dentro va
+#                                python, tkinter y los 2 PNG
 #
-# Por qué --onedir y NO --onefile:
-#   * onefile extrae todo a /tmp/_MEIxxxx y lo BORRA al cerrar la app. El
-#     Icon= que se escribe en los .desktop apuntaría a un temporal que ya no
-#     existe (probado: el lanzador queda roto nada más cerrar).
-#   * onedir deja los ficheros reales en _internal/, que es donde apunta
-#     __file__ del programa, y main.py busca los PNG justo ahí. No hay que
-#     tocar ni una línea de código.
+# Por qué --onefile y NO --onedir:
+#   LinuxHelm (la app contenedora) despliega SOLO el ejecutable en
+#   ~/.config/ulx/LinuxHelm/tools/ (plano, +x) y BORRA el resto: con
+#   --onedir las bibliotecas quedaban en _internal/ y el binario arrancado
+#   desde ahí moría con "libpython3.14.so.1.0: cannot open shared object
+#   file" (código 255). Con --onefile el binario va solo y funciona en
+#   cualquier sitio (la app, la terminal, copiado a otro ordenador).
 #
-# Los PNG van con --add-data pero NO se incrustan en el ejecutable: quedan
-# como ficheros sueltos en _internal/ y se pueden reemplazar sin recompilar.
+# El motivo por el que antes se evitaba --onefile ya está resuelto: el
+# Icon= de los .desktop que crea la herramienta apuntaba a los PNG
+# embebidos, que en --onefile viven en un temporal que se borra al cerrar
+# (el lanzador quedaba roto). Ahora main.py copia el logo una vez a
+# ~/.local/share/icons/ y el .desktop usa esa copia fija
+# (ver icono_permanente()).
+#
+# Los PNG van con --add-data y quedan embebidos en el binario.
 set -euo pipefail
 
 cd "$(dirname "$0")"   # el script funciona desde cualquier sitio
@@ -59,42 +65,38 @@ else
   exit 1
 fi
 
-echo "==> Compilando $NOMBRE (onedir, GUI) con: ${LANZADOR[*]}"
+echo "==> Compilando $NOMBRE (onefile, GUI) con: ${LANZADOR[*]}"
 
 "${LANZADOR[@]}" \
   --noconfirm \
   --clean \
   --windowed \
-  --onedir \
+  --onefile \
   --name "$NOMBRE" \
   --add-data "AppLogo.png:." \
   --add-data "TarGzLogo.png:." \
   main.py
 
-BINARIO="dist/$NOMBRE/$NOMBRE"
-INTERNOS="dist/$NOMBRE/_internal"
+BINARIO="dist/$NOMBRE"
 
 # --- comprobaciones finales --------------------------------------------
 if [[ ! -x "$BINARIO" ]]; then
   echo "✗ No se generó el binario: $BINARIO" >&2
   exit 1
 fi
-for png in AppLogo.png TarGzLogo.png; do
-  if [[ ! -f "$INTERNOS/$png" ]]; then
-    echo "✗ Falta $png en $INTERNOS (no se empaquetó el recurso)" >&2
-    exit 1
-  fi
-done
+if [[ -d "dist/$NOMBRE/_internal" ]]; then
+  echo "✗ Se generó un _internal/: ¿se ha compilado con --onedir por error?" >&2
+  exit 1
+fi
 
 echo
-echo "✓ Binario listo:"
+echo "✓ Binario listo (autocontenido, un solo fichero):"
 echo "    $BINARIO   ($(du -h "$BINARIO" | cut -f1))"
-echo "    PNG sueltos en: $INTERNOS/"
 echo
 echo "  Para probar:   $BINARIO"
 echo "  Para repartir: tar czf $NOMBRE.tar.gz -C dist $NOMBRE"
 echo
 echo "  Notas:"
 echo "   - En la máquina destino hacen falta 'tar' y 'pkexec'."
-echo "   - Icon= de los .desktop apunta a $INTERNOS/TarGzLogo.png:"
-echo "     no muevas la carpeta después de crear lanzadores."
+echo "   - El Icon= de los .desktop que crea la herramienta apunta a"
+echo "     ~/.local/share/icons/$NOMBRE.png (copia permanente del logo)."

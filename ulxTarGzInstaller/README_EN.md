@@ -108,7 +108,7 @@ accents; messages use green `✓`, red `✗` and amber `⏳`.
 - Linux with a **graphical session** (X11/Wayland) and `glibc ≥ 2.17` (any distro from the
   last ~12 years; ⚠️ Alpine/musl will not work).
 - **`tar`** (GNU tar) and **`pkexec`** (policykit) — present in every Linux desktop.
-- To run the binary: **nothing else** (Python and Tk are inside the folder).
+- To run the binary: **nothing else** (Python and Tk are inside the binary itself).
 - Only if you prefer running it from source: `python3` with `tkinter`
   (`sudo apt install python3-tk`).
 
@@ -119,14 +119,15 @@ accents; messages use green `✓`, red `✗` and amber `⏳`.
 ### With the binary (recommended for distribution)
 
 ```bash
-./build.sh                                  # builds (PyInstaller, slow the first time)
-./dist/ulxTarGzInstaller/ulxTarGzInstaller  # starts the GUI
+./build.sh                      # builds (PyInstaller, slow the first time)
+./dist/ulxTarGzInstaller        # starts the GUI (ONE self-contained file)
 ```
 
-To hand it to someone, ship **the whole folder** (the executable needs its `_internal/`):
+To hand it to someone, **the executable alone is enough** (Python, Tk and the
+logos are embedded in it; no `_internal/` or anything else needed):
 
 ```bash
-tar czf ulxTarGzInstaller.tar.gz -C dist ulxTarGzInstaller
+cp dist/ulxTarGzInstaller /anywhere/
 ```
 
 ### From source
@@ -206,15 +207,16 @@ And if it was already installed:
 
 ## Tips
 
-1. **Move the folder first, install second** (`/opt` or `~/.local/opt`), and only then
+1. **Move the binary first, install second** (`/opt` or `~/.local/opt`), and only then
    create launchers with the tool.
 
-2. **To distribute the app to a client**: `build.sh` already prints the exact command
-   (`tar czf …`) — the client just extracts and runs it, no Python or anything to install.
+2. **To distribute the app to a client**: just copy the single executable —
+   it is fully self-contained, no Python or anything to install.
 
-3. **Want to change the logo** (window/icon): replace `_internal/AppLogo.png` or
-   `_internal/TarGzLogo.png` (they are loose files, not embedded in the executable) — no
-   rebuild needed.
+3. **Want to change the logo** (window/icon): replace `AppLogo.png` or
+   `TarGzLogo.png` in the source and rebuild (`./build.sh`) — with `--onefile`
+   the logos are embedded in the binary, no longer loose files you can swap
+   without rebuilding.
 
 4. **If a reinstall leaves leftovers**, uninstall with `return` and install again: that's
    the clean way.
@@ -240,6 +242,6 @@ And if it was already installed:
 | ├ `_trabajo_*()` | Extract/run/undo — they run in a thread (`_en_hilo`) |
 | ├ `_drenar_cola()` / `_programar()` | Bring results back to the Tk thread (no freezing) |
 | └ `crear_ventana()` | GUI: card, buttons, gray/blue palette |
-| `build.sh` (100 lines) | Builds the binary with PyInstaller (onedir) using the system Python |
+| `build.sh` (100 lines) | Builds the binary with PyInstaller (onefile, self-contained) using the system Python |
 | `tests/` | 63 checks (installer, security, dialog, no-freeze) + `capturar.py` |
-| `AppLogo.png` / `TarGzLogo.png` | Window logo and generic logo (loose files in `_internal/`) |
+| `AppLogo.png` / `TarGzLogo.png` | Window logo and generic logo (embedded in the binary) |

@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -17,6 +18,14 @@ RAIZ_OPT: Path = Path("/opt")
 
 # Dónde se dejan los .desktop del usuario. También es conste para testear.
 DIR_LANZADORES: Path = Path.home() / ".local" / "share" / "applications"
+
+# Dónde se deja el icono PERMANENTE de los .desktop que crea la herramienta.
+# Con --onefile los PNG embebidos se extraen a un temporal que se borra al
+# cerrar: si el Icon= apuntara ahí, el lanzador quedaría roto nada más cerrar
+# (por eso antes se usaba --onedir). La solución es copiar el logo una vez a
+# esta carpeta fija y que el .desktop apunte a esa copia. También es constante
+# para testear.
+DIR_ICONOS: Path = Path.home() / ".local" / "share" / "icons"
 
 # Raíces que NUNCA se usan como nombre propio: si el .tar.gz trae una de
 # estas, se instala dentro de un subdirectorio nuestro en vez de tocar
@@ -36,9 +45,15 @@ ejecutable_elegido: Path | None = None
 # Los hilos de trabajo dejan aquí lo que la interfaz debe pintar
 cola: queue.Queue[Callable[[], None]] = queue.Queue()
 
-# El logo vive junto a este script, no en el directorio de trabajo
-RUTA_LOGO: Path = Path(__file__).resolve().parent / "AppLogo.png"
-RUTA_LOGO_GENERICO: Path = Path(__file__).resolve().parent / "TarGzLogo.png"
+# Los recursos empaquetados (los 2 PNG) viven junto a este script. Con
+# PyInstaller --onefile se extraen a sys._MEIPASS (un temporal que se borra
+# al cerrar), así que ahí hay que buscarlos; al ejecutar desde el fuente,
+# junto a main.py. En --onedir apunta a _internal/, igual que antes.
+DIR_RECURSOS: Path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+# Logo de la ventana (iconphoto) y logo genérico para los .desktop
+RUTA_LOGO: Path = DIR_RECURSOS / "AppLogo.png"
+RUTA_LOGO_GENERICO: Path = DIR_RECURSOS / "TarGzLogo.png"
 logo: tk.PhotoImage | None = None        # icono de la ventana (GC de Tk)
 logo_cabecera: tk.PhotoImage | None = None  # logo pequeño de la cabecera (GC de Tk)
 
@@ -409,6 +424,27 @@ def logo_del_app() -> Path | None:
     return None
 
 
+def icono_permanente() -> Path | None:
+    """Copia TarGzLogo.png a DIR_ICONOS (si hacía falta) y devuelve esa ruta fija.
+
+    El Icon= de un .desktop debe apuntar a un fichero que EXISTA siempre: con
+    --onefile el logo embebido vive en un temporal que se borra al cerrar la
+    app, así que aquí se guarda una copia duradera en ~/.local/share/icons/.
+    Se copia solo si falta o cambió de tamaño (logo nuevo en otra versión).
+    """
+    if not RUTA_LOGO_GENERICO.exists():
+        return None
+    destino = DIR_ICONOS / "ulxTarGzInstaller.png"
+    try:
+        if (not destino.exists()
+                or destino.stat().st_size != RUTA_LOGO_GENERICO.stat().st_size):
+            DIR_ICONOS.mkdir(parents=True, exist_ok=True)
+            destino.write_bytes(RUTA_LOGO_GENERICO.read_bytes())
+    except OSError:
+        return None    # sin permisos: el .desktop se queda sin Icon, no tronar
+    return destino
+
+
 # ----- Escritura del .desktop -----
 def _argumentos_de(exec_original: str) -> str:
     """Argumentos de un Exec, quitándole el programa de delante.
@@ -435,7 +471,7 @@ def _exec_para(ejecutable: Path, exec_original: str) -> str:
 
 
 def _desktop_nuestro(ejecutable: Path, terminal: bool) -> str:
-    icono = logo_del_app() or (RUTA_LOGO_GENERICO if RUTA_LOGO_GENERICO.exists() else None)
+    icono = logo_del_app() or icono_permanente()
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"

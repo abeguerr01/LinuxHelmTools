@@ -108,7 +108,7 @@ acentos; mensajes con `✓` verde, `✗` rojo y `⏳` ámbar.
 - Linux con **entorno gráfico** (X11/Wayland) y `glibc ≥ 2.17` (cualquier distro de los
   últimos ~12 años; ⚠️ no vale Alpine/musl).
 - **`tar`** (GNU tar) y **`pkexec`** (policykit) — vienen en todo escritorio Linux.
-- Para ejecutar el binario: **nada más** (Python y Tk van dentro de la carpeta).
+- Para ejecutar el binario: **nada más** (Python y Tk van dentro del propio binario).
 - Solo si prefieres lanzarlo con Python: `python3` con `tkinter`
   (`sudo apt install python3-tk`).
 
@@ -119,14 +119,15 @@ acentos; mensajes con `✓` verde, `✗` rojo y `⏳` ámbar.
 ### Con el binario (recomendado para repartir)
 
 ```bash
-./build.sh                                  # compila (PyInstaller, solo la 1ª vez tarda)
-./dist/ulxTarGzInstaller/ulxTarGzInstaller  # arranca la GUI
+./build.sh                      # compila (PyInstaller, solo la 1ª vez tarda)
+./dist/ulxTarGzInstaller        # arranca la GUI (UN solo fichero, autocontenido)
 ```
 
-Para dárselo a alguien, **la carpeta entera** (el ejecutable necesita su `_internal/`):
+Para dárselo a alguien, basta con **el ejecutable solo** (Python, Tk y los logos
+van embebidos dentro; no hace falta `_internal/` ni nada más):
 
 ```bash
-tar czf ulxTarGzInstaller.tar.gz -C dist ulxTarGzInstaller
+cp dist/ulxTarGzInstaller / donde-quieras/
 ```
 
 ### Con el código fuente
@@ -215,9 +216,10 @@ Y si ya estaba instalado:
 2. **Para repartir la app a un cliente**: `build.sh` ya te imprime la orden exacta
    (`tar czf …`) — el cliente solo descomprime y ejecuta, sin instalar Python ni nada.
 
-3. **Quieres cambiar el logo** de la ventana/icono: sustituye `_internal/AppLogo.png` o
-   `_internal/TarGzLogo.png` (son ficheros sueltos, no están dentro del ejecutable) y no
-   hace falta recompilar.
+3. **Quieres cambiar el logo** de la ventana/icono: sustituye `AppLogo.png` o
+   `TarGzLogo.png` en el fuente y recompila (`./build.sh`) — con `--onefile` los
+   logos van embebidos en el binario, ya no son ficheros sueltos que se puedan
+   cambiar sin recompilar.
 
 4. **Si una reinstalación deja restos**, desinstala con `return` y vuelve a instalar: es la
    forma limpia.
@@ -243,6 +245,6 @@ Y si ya estaba instalado:
 | ├ `_trabajo_*()` | Extracción/abrir/deshacer — van en hilo (`_en_hilo`) |
 | ├ `_drenar_cola()` / `_programar()` | Devuelven los resultados al hilo de Tk (no congela) |
 | └ `crear_ventana()` | GUI: tarjeta, botones, paleta gris/azul |
-| `build.sh` (100 líneas) | Compila el binario con PyInstaller (onedir) usando el Python del sistema |
+| `build.sh` (100 líneas) | Compila el binario con PyInstaller (onefile, autocontenido) usando el Python del sistema |
 | `tests/` | 63 comprobaciones (instalador, seguridad, diálogo, no-congelamiento) + `capturar.py` |
-| `AppLogo.png` / `TarGzLogo.png` | Logo de la ventana y logo genérico (van sueltos en `_internal/`) |
+| `AppLogo.png` / `TarGzLogo.png` | Logo de la ventana y logo genérico (van embebidos en el binario) |
