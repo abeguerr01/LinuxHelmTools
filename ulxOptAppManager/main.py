@@ -4,7 +4,9 @@ Muestra las carpetas de /opt (donde quedan las apps instaladas con
 ulxTarGzInstaller, o a mano con cualquier .tar.gz) y, de cada una, enseña
 sus ejecutables, sus lanzadores .desktop, su icono y su tamaño.
 
-Además puede BORRAR la app seleccionada: pide confirmación con detalles,
+Además puede LANZAR el ejecutable de la app seleccionada (Execute, como
+usuario normal), crear el lanzador de menú que le falte (se detecta al
+escanear y se ofrece) y BORRAR la app: pide confirmación con detalles,
 ejecuta `pkexec rm -rf` (una sola petición de contraseña) y elimina los
 lanzadores del menú que apuntaban a ella.
 """
@@ -29,6 +31,19 @@ RAIZ_OPT: Path = Path("/opt")
 # Dónde están los lanzadores del menú del usuario: al borrar una app se
 # quitan también los .desktop que apuntan a ella. Constante para testear.
 DIR_LANZADORES: Path = Path.home() / ".local" / "share" / "applications"
+
+# Lanzadores del menú donde buscar el Icon= de una app cuando el .desktop
+# no vive dentro de su carpeta (lo normal: se instaló un .deb a mano y su
+# .desktop fue a /usr/share/applications). Constantes para testear.
+DIR_LANZADORES_SISTEMA: Path = Path("/usr/share/applications")
+
+# Temas de iconos del sistema: donde el menú resuelve los Icon= que son
+# NOMBRES (brave-desktop, gh-desktop-plus…). Se miran de mayor a menor y
+# del usuario al sistema. Constante para testear.
+TEMAS_SISTEMA: tuple[Path, ...] = (
+    Path.home() / ".local" / "share" / "icons" / "hicolor",
+    Path("/usr/share/icons/hicolor"),
+)
 
 # Los recursos empaquetados (los PNG) viven junto a este script. Con
 # PyInstaller --onefile se extraen a sys._MEIPASS (un temporal que se borra
@@ -68,7 +83,8 @@ class Aplicacion:
     legible: bool = True
     ejecutables: list[Path] = field(default_factory=list[Path])  # relativas
     escritorios: list[Path] = field(default_factory=list[Path])  # relativas
-    icono: Path | None = None                               # ruta relativa
+    icono: Path | None = None        # relativa a la raíz; absoluta si es del sistema
+    lanzador: Path | None = None     # su .desktop del menú (absoluta); None = no está en el menú
     tamano: int | None = None                               # bytes; None = ilegible
 
 
@@ -79,6 +95,10 @@ cola: queue.Queue[Callable[[], None]] = queue.Queue()
 aplicaciones: list[Aplicacion] = []
 aplicaciones_por_nombre: dict[str, Aplicacion] = {}
 
+# ¿Ya se ha preguntado en esta sesión por crear los lanzadores que faltan?
+# Solo se pregunta una vez: si el usuario dice que no, no se insiste.
+_preguntado_lanzadores: bool = False
+
 # Widgets creados por crear_ventana() y usados después por los callbacks
 ventana: tk.Tk
 lista: ttk.Treeview
@@ -87,6 +107,7 @@ etiqueta_icono: tk.Label
 etiquetaConfir: tk.Label
 boton: tk.Button
 btn_abrir: tk.Button
+btn_ejecutar: tk.Button
 btn_borrar: tk.Button
 
 
@@ -96,6 +117,30 @@ btn_borrar: tk.Button
 def es_aplicacion(app: Aplicacion) -> bool:
     """¿Tiene pinta de app (ejecutables o lanzadores) o es solo una carpeta?"""
     return bool(app.ejecutables or app.escritorios)
+
+
+def ejecutable_de(app: Aplicacion) -> Path | None:
+    """El ejecutable más probable para lanzar la app (relativo a su raíz).
+
+    No basta con el primero de la lista: en brave-bin hay chingueras
+    (chrome-sandbox, crashpad handler…) antes que `brave`. Se prefiere,
+    por este orden:
+      1. El que se llama como la carpeta (sin versión): desktop-plus.
+      2. El que lleva el nombre de la carpeta como ficha: brave-bin ->
+         «brave» («bin» es genérica y no cuenta).
+      3. El primero de la lista, ya ordenada, como último recurso.
+    """
+    if not app.ejecutables:
+        return None
+    base = re.sub(r"[-_]?\d[\d._-]*$", "", app.nombre) or app.nombre
+    for ejecutable in app.ejecutables:
+        if ejecutable.stem == base:
+            return ejecutable
+    fichas = _fichas(base)
+    for ejecutable in app.ejecutables:
+        if ejecutable.stem in fichas:
+            return ejecutable
+    return app.ejecutables[0]
 
 
 def _es_ejecutable(fichero: Path) -> bool:
@@ -141,34 +186,215 @@ def buscar_escritorios(raiz: Path) -> list[Path]:
     return sorted(encontrados)
 
 
-def buscar_icono(raiz: Path, nombre: str) -> Path | None:
-    """El icono más representativo de la app (relativo a su raíz)."""
-    # el nombre de la carpeta suele llevar la versión (myapp-1.0) mientras
-    # que el icono se llama solo myapp: se prueba con los dos nombres
+def _iconos_de(ruta_fichero: Path) -> list[str]:
+    """Valores del campo Icon= de un .desktop (en orden, sin repetidos)."""
+    try:
+        contenido = ruta_fichero.read_text(errors="replace")
+    except OSError:
+        return []
+    valores: list[str] = []
+    for linea in contenido.splitlines():
+        if linea.startswith("Icon="):
+            valor = linea.split("=", 1)[1].strip()
+            if valor and valor not in valores:
+                valores.append(valor)
+    return valores
+
+
+def _iconos_de_escritorios(raiz: Path, escritorios: list[Path]) -> list[str]:
+    """Valores del campo Icon= de los .desktop de la propia app.
+
+    Es EL icono que el escritorio muestra en su menú de aplicaciones, así
+    que es lo primero que se intenta. Se devuelven en el orden en que
+    aparecen (el primero es el que manda).
+    """
+    valores: list[str] = []
+    for relativo in escritorios:
+        for valor in _iconos_de(raiz / relativo):
+            if valor not in valores:
+                valores.append(valor)
+    return valores
+
+
+def _fichas(texto: str) -> set[str]:
+    """Fichas del nombre de una app o lanzador, para compararlas.
+
+    Minúsculas y separadas por todo lo que no sea letra o dígito, con las
+    genéricas fuera («bin», «app»…) y las de menos de 4 caracteres
+    (versiones y siglas sueltas no dicen nada).
+    """
+    genericas = {"bin", "app", "apps", "run", "exec", "opt", "usr", "lib"}
+    return {f for f in re.split(r"[^a-z0-9]+", texto.lower())
+            if len(f) >= 4 and f not in genericas}
+
+
+def _lanzadores_del_menu(nombre: str) -> list[Path]:
+    """Lanzadores del menú (usuario/sistema) que apuntan a esta app.
+
+    El .desktop de muchas apps de /opt NO vive en la carpeta: se instaló
+    a mano y su lanzador quedó en ~/.local/share/applications o en
+    /usr/share/applications. Dos señales de que un .desktop es de esta
+    app, por este orden:
+      - fuerte: su Exec=/Path= menciona /opt/<nombre>;
+      - débil: su nombre y su Name= contienen TODAS las fichas del
+        nombre de la carpeta (brave-bin -> «brave», que «bin» es
+        genérica; desktop-plus -> «desktop» y «plus»).
+    Devuelve rutas absolutas, del usuario al sistema.
+    """
+    carpetas = (DIR_LANZADORES, DIR_LANZADORES_SISTEMA)  # al vuelo, testeable
+    # sin la versión: «jetbrains-toolbox-3.8.1.88030» -> «jetbrains-toolbox»
+    base = re.sub(r"[-_]?\d[\d._-]*$", "", nombre) or nombre
+    fichero_fichas = _fichas(base)
+    fuertes: list[Path] = []
+    debiles: list[Path] = []
+    for directorio in carpetas:
+        try:
+            with os.scandir(directorio) as contenido:
+                entradas = sorted(contenido, key=lambda e: e.name)
+        except OSError:
+            continue
+        for entrada in entradas:
+            if not entrada.name.endswith(".desktop") or not entrada.is_file():
+                continue
+            ruta = Path(entrada.path)
+            try:
+                texto = ruta.read_text(errors="replace")
+            except OSError:
+                continue
+            referencia_hecha = False
+            for linea in texto.splitlines():
+                if linea.startswith(("Exec=", "Path=", "TryExec=")):
+                    if f"/opt/{nombre}" in linea.split("=", 1)[1]:
+                        referencia_hecha = True
+                        break
+            if referencia_hecha:
+                fuertes.append(ruta)
+                continue
+            if not fichero_fichas:
+                continue
+            # el nombre del fichero y su Name= tienen que decir «de qué va»
+            nombre_fichero = ruta.stem
+            name = next((linea.split("=", 1)[1] for linea in texto.splitlines()
+                         if linea.startswith("Name=")), "")
+            lanzador_fichas = _fichas(f"{nombre_fichero} {name}")
+            if fichero_fichas <= lanzador_fichas:
+                debiles.append(ruta)
+    return fuertes + debiles
+
+
+def _icono_sistema(valor: str) -> Path | None:
+    """Resuelve un Icon= del menú en los temas del sistema (absoluta).
+
+    Acepta ruta absoluta (si existe tal cual) o nombre de icono, que se
+    busca en los hicolor del usuario y del sistema, de mayor a menor y
+    con .png antes que .svg (Tk solo sabe pintar PNG).
+    """
+    if valor.startswith("/"):
+        ruta = Path(valor)
+        return ruta if ruta.is_file() else None
+    tamaños = ("scalable", "512x512", "256x256", "128x128", "64x64",
+               "48x48", "32x32", "24x24", "16x16")
+    # PNG antes que SVG: Tk solo sabe pintar PNG, y de PNG, el grande
+    for extension in (".png", ".svg"):
+        for tamano in tamaños:
+            for tema in TEMAS_SISTEMA:
+                candidato = tema / tamano / "apps" / f"{valor}{extension}"
+                if candidato.is_file():
+                    return candidato
+    return None
+
+
+def _en_tema(raiz: Path, nombre_icono: str) -> Path | None:
+    """Busca un nombre de icono en los temas que trae la propia app.
+
+    Recorre share/icons/hicolor de MAYOR a menor (lo escalable primero,
+    que es lo que usa el escritorio para pintar nítido), y después
+    share/pixmaps. Devuelve la ruta relativa a la raíz de la app.
+    """
+    hicolor = raiz / "share" / "icons" / "hicolor"
+    for tamano in ("scalable", "256x256", "128x128", "64x64",
+                   "48x48", "32x32", "24x24", "16x16"):
+        for extension in (".png", ".svg", ".xpm"):
+            candidato = hicolor / tamano / "apps" / f"{nombre_icono}{extension}"
+            if candidato.is_file():
+                return candidato.relative_to(raiz)
+    for extension in (".png", ".svg", ".xpm"):
+        candidato = raiz / "share" / "pixmaps" / f"{nombre_icono}{extension}"
+        if candidato.is_file():
+            return candidato.relative_to(raiz)
+    return None
+
+
+def buscar_icono(raiz: Path, nombre: str, escritorios: list[Path] | None = None,
+                 menu: list[Path] | None = None
+                 ) -> Path | None:
+    """El icono más representativo de la app.
+
+    Relativo a su raíz, salvo el del menú del sistema (1b), que se
+    devuelve como ruta absoluta (al pintarlo se une con la raíz y una
+    ruta absoluta a la derecha manda, así que funciona igual).
+
+    Orden, de mejor a peor fuente:
+      1. El Icon= de los .desktop de la propia app: es literalmente el
+         icono del menú de aplicaciones del escritorio.
+      1b. El Icon= del lanzador del menú que apunta a /opt/<nombre>
+          (el .desktop suele vivir en el sistema, no en la app).
+      2. El nombre de la carpeta (quitándole la versión si la trae),
+         buscado en TODOS los tamaños del tema que trae la app.
+      3. Cualquier icono de hicolor que traiga la app (nombre que no
+         coincide con la carpeta).
+      4. Un PNG de la raíz.
+    """
+    # 1) el icono que el .desktop declara para el menú
+    if escritorios:
+        for valor in _iconos_de_escritorios(raiz, escritorios):
+            # ¿es una ruta absoluta? si apunta dentro de la app, se usa
+            if valor.startswith("/"):
+                ruta = Path(valor)
+                try:
+                    relativo = ruta.relative_to(raiz)
+                except ValueError:
+                    continue          # apunta fuera de la app: se ignora
+                if (raiz / relativo).is_file():
+                    return relativo
+            else:                      # nombre de icono: buscarlo en su tema
+                hallado = _en_tema(raiz, valor)
+                if hallado is not None:
+                    return hallado
+
+    # 1b) el icono del lanzador del menú (vive fuera de la app)
+    if menu is None:              # si no lo ha traído el escaneo, buscarlo
+        menu = _lanzadores_del_menu(nombre)
+    for lanzador in menu:
+        for valor in _iconos_de(lanzador):
+            hallado = _icono_sistema(valor)
+            if hallado is not None:
+                return hallado
+
+    # 2) el nombre de la carpeta (con y sin versión)
     base = re.sub(r"[-_]?\d[\d._-]*$", "", nombre) or nombre
     nombres = [nombre] if base == nombre else [nombre, base]
     for n in nombres:
-        for relativo in (f"share/icons/hicolor/256x256/apps/{n}.png",
-                         f"share/icons/hicolor/scalable/apps/{n}.svg",
-                         f"share/icons/hicolor/48x48/apps/{n}.png",
-                         f"share/pixmaps/{n}.png",
-                         f"{n}.png"):
-            if (raiz / relativo).is_file():
-                return Path(relativo)
+        hallado = _en_tema(raiz, n)
+        if hallado is not None:
+            return hallado
+        if (raiz / f"{n}.png").is_file():
+            return Path(f"{n}.png")
     if (raiz / "logo.png").is_file():
         return Path("logo.png")
+
+    # 3) el primer icono de hicolor que traiga la app, del tamaño que sea
+    hicolor = raiz / "share" / "icons" / "hicolor"
     try:
-        # el primer icono de hicolor que traiga la app, si el nombre no coincide
-        for carpeta_rel in ("share/icons/hicolor/256x256/apps",
-                            "share/icons/hicolor/scalable/apps"):
-            carpeta = raiz / carpeta_rel
+        for tamano in sorted(hicolor.iterdir()):
+            carpeta = tamano / "apps"
             if carpeta.is_dir():
                 for fichero in sorted(carpeta.iterdir()):
-                    if fichero.suffix.lower() in (".png", ".svg"):
+                    if fichero.suffix.lower() in (".png", ".svg", ".xpm"):
                         return fichero.relative_to(raiz)
     except OSError:
         pass
-    try:  # cualquier PNG de la raíz sirve como último recurso
+    try:  # 4) cualquier PNG de la raíz sirve como último recurso
         for fichero in sorted(raiz.iterdir()):
             if fichero.is_file() and fichero.suffix.lower() == ".png":
                 return fichero.relative_to(raiz)
@@ -198,12 +424,15 @@ def inspeccionar(ruta: Path) -> Aplicacion:
     except OSError:                 # permiso denegado u otra razón
         return Aplicacion(nombre=nombre, ruta=ruta, legible=False)
 
+    escritorios = buscar_escritorios(ruta)
+    menu = _lanzadores_del_menu(nombre)   # una sola pasada: icono 1b + campo
     return Aplicacion(
         nombre=nombre,
         ruta=ruta,
         ejecutables=buscar_ejecutables(ruta),
-        escritorios=buscar_escritorios(ruta),
-        icono=buscar_icono(ruta, nombre),
+        escritorios=escritorios,
+        icono=buscar_icono(ruta, nombre, escritorios, menu),
+        lanzador=menu[0] if menu else None,
         tamano=peso_de(ruta),
     )
 
@@ -265,6 +494,11 @@ def texto_detalles(app: Aplicacion) -> str:
         if len(app.escritorios) > 6:
             lineas.append(f"  … and {len(app.escritorios) - 6} more")
 
+    if es_aplicacion(app):
+        lineas.append("")
+        lineas.append(f"Menu launcher: {app.lanzador.name}" if app.lanzador
+                      else "Menu launcher: none (not in the applications menu)")
+
     if app.icono is not None:
         lineas.append("")
         lineas.append(f"Icon: {app.icono}")
@@ -322,6 +556,48 @@ def lanzadores_de(nombre: str, dir_lanzadores: Path | None = None
     except OSError:
         pass
     return encontrados
+
+
+# ============================================================
+# Creación del lanzador que falte (misma receta que ulxTarGzInstaller)
+# ============================================================
+def _desktop_de(app: Aplicacion, ejecutable: Path) -> str:
+    """Contenido del .desktop del menú para una app.
+
+    Mismo formato que el que escribe ulxTarGzInstaller (Categories,
+    Name con el nombre de la carpeta…): si el instalador la instaló a
+    mano, el resultado en el menú es indistinguible.
+    """
+    icono = str(app.ruta / app.icono) if app.icono is not None else ""
+    programa = str(ejecutable)
+    if " " in programa:   # el spec de .desktop usa comillas dobles
+        programa = f'"{programa}"'
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={app.nombre}\n"
+        f"Exec={programa}\n"
+        f"Icon={icono}\n"
+        "Terminal=false\n"
+        "Categories=HelmTool;\n"
+    )
+
+
+def crear_lanzador(app: Aplicacion) -> Path | None:
+    """Escribe el .desktop de la app en el menú del usuario (sin root).
+
+    Lanza su ejecutable preferido (ejecutable_de) con su icono. Actualiza
+    app.lanzador para que la interfaz lo pinte sin reescanear. Devuelve
+    la ruta escrita, o None si la app no tiene ejecutable que lanzar.
+    """
+    relativo = ejecutable_de(app)
+    if relativo is None:
+        return None
+    DIR_LANZADORES.mkdir(parents=True, exist_ok=True)
+    destino = DIR_LANZADORES / f"{app.nombre}.desktop"
+    destino.write_text(_desktop_de(app, app.ruta / relativo), encoding="utf-8")
+    app.lanzador = destino
+    return destino
 
 
 # ============================================================
@@ -401,9 +677,30 @@ def _bloquear_botones(ocupar: bool) -> None:
     estado = tk.DISABLED if ocupar else tk.NORMAL
     boton.config(state=estado, bg=("#c3ccd8" if ocupar else AZUL))
     btn_borrar.config(state=estado, bg=("#c3ccd8" if ocupar else ROJO))
-    # el de abrir solo se reactiva si hay selección (lo decide la selección)
+    # los de abrir y ejecutar solo se reactivan si hay selección
+    # (lo decide la selección)
     if ocupar:
         btn_abrir.config(state=tk.DISABLED)
+        btn_ejecutar.config(state=tk.DISABLED)
+
+
+def _actualizar_botones_seleccion() -> None:
+    """Activa o deshabilita Abrir/Ejecutar/Borrar según la selección.
+
+    Es la única decide cómo quedan los tres botones; así todos los
+    caminos (seleccionar, refrescar, borrar, ejecutar) acaban igual.
+    """
+    app = _app_seleccionada()
+    if app is None:
+        btn_abrir.config(state=tk.DISABLED)
+        btn_ejecutar.config(state=tk.DISABLED)
+        btn_borrar.config(state=tk.DISABLED)
+        return
+    btn_abrir.config(state=tk.NORMAL if app.legible else tk.DISABLED)
+    btn_ejecutar.config(state=tk.NORMAL if app.ejecutables else tk.DISABLED)
+    # se puede borrar aunque la carpeta no sea legible para el usuario
+    # (el rm -rf va como root): solo hace falta que sea una ruta válida
+    btn_borrar.config(state=tk.NORMAL if ruta_borrable(app.nombre) else tk.DISABLED)
 
 
 # ============================================================
@@ -447,6 +744,52 @@ def _trabajo_borrar(ruta: Path) -> tuple[str, bool]:
     return f"✓ {ruta.name} deleted{extra}", True
 
 
+def _trabajo_ejecutar(ruta: Path) -> tuple[str, bool]:
+    """Lanza el ejecutable sin esperar a que termine.
+
+    Va como usuario normal (sin pkexec): la app se lanza con los mismos
+    permisos que tendría desde el menú del escritorio.
+    """
+    try:
+        proceso = subprocess.Popen(
+            [str(ruta)],
+            cwd=str(ruta.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return f"✗ Error: {exc}", False
+
+    # Solo bloquea este hilo: da tiempo a coger un arranque fallido
+    time.sleep(0.3)
+    if proceso.poll() is not None and proceso.returncode != 0:
+        return f"✗ {ruta.name} exited with code {proceso.returncode}", False
+    return f"✓ {ruta.name} executed", True
+
+
+def _trabajo_crear_lanzadores(apps: list[Aplicacion]) -> tuple[str, bool]:
+    """Escribe los .desktop que faltan en el menú del usuario (sin root)."""
+    creados = 0
+    sin_ejecutable: list[str] = []
+    error: str | None = None
+    for app in apps:
+        try:
+            if crear_lanzador(app) is None:
+                sin_ejecutable.append(app.nombre)
+            else:
+                creados += 1
+        except OSError as exc:   # p. ej. ~/.local inaccesible: sigue igual
+            error = str(exc)
+            break
+    if error is not None:
+        return f"✗ Error: {error}", False
+    extra = (f" · {len(sin_ejecutable)} skipped (no executable)"
+             if sin_ejecutable else "")
+    if creados == 0:
+        return f"⚠ Nothing created{extra}", False
+    return f"✓ {creados} launcher(s) created{extra}", True
+
+
 # ============================================================
 # Callbacks de la interfaz (van en el hilo de Tk)
 # ============================================================
@@ -468,9 +811,9 @@ def _escaneo_terminado(mensaje: str, exito: bool) -> None:
     etiqueta_detalles.config(text="")
     etiqueta_icono.config(image="")
     _bloquear_botones(False)
-    btn_abrir.config(state=tk.DISABLED)
-    btn_borrar.config(state=tk.DISABLED)   # sin selección no hay nada que borrar
+    _actualizar_botones_seleccion()   # sin selección: los tres a off
     _poner_mensaje(etiquetaConfir, mensaje)
+    _preguntar_lanzadores()           # ¿falta meter alguna app en el menú?
 
 
 def _app_seleccionada() -> Aplicacion | None:
@@ -486,10 +829,7 @@ def _seleccion_cambiada() -> None:
     if app is None:
         return
     etiqueta_detalles.config(text=texto_detalles(app))
-    btn_abrir.config(state=tk.NORMAL if app.legible else tk.DISABLED)
-    # se puede borrar aunque la carpeta no sea legible para el usuario
-    # (el rm -rf va como root): solo hace falta que sea una ruta válida
-    btn_borrar.config(state=tk.NORMAL if ruta_borrable(app.nombre) else tk.DISABLED)
+    _actualizar_botones_seleccion()
 
     # icono del panel de detalles (solo PNG, Tk no abre SVG)
     logo_app = None
@@ -514,6 +854,27 @@ def abrir_carpeta() -> None:
         _poner_mensaje(etiquetaConfir, f"✓ Opening {app.nombre}")
     except Exception as exc:
         _poner_mensaje(etiquetaConfir, f"✗ Error: {exc}")
+
+
+def ejecutar() -> None:
+    """Lanza el ejecutable de la app seleccionada (sin esperar)."""
+    app = _app_seleccionada()
+    if app is None:
+        return
+    relativo = ejecutable_de(app)
+    if relativo is None:
+        _poner_mensaje(etiquetaConfir, f"✗ No executable found in {app.nombre}")
+        return
+
+    _bloquear_botones(True)
+    _poner_mensaje(etiquetaConfir, f"⏳ Executing {relativo} ...")
+    _en_hilo(lambda: _trabajo_ejecutar(app.ruta / relativo), _ejecucion_terminada)
+
+
+def _ejecucion_terminada(mensaje: str, exito: bool) -> None:
+    _bloquear_botones(False)
+    _actualizar_botones_seleccion()   # la selección sigue ahí: se reactivan
+    _poner_mensaje(etiquetaConfir, mensaje)
 
 
 def borrar() -> None:
@@ -557,10 +918,55 @@ def _borrado_terminado(mensaje: str, exito: bool) -> None:
         seleccion = lista.selection()
         if seleccion:
             lista.delete(seleccion[0])
+            lista.selection_remove(*seleccion)
         etiqueta_detalles.config(text="Select an application")
         etiqueta_icono.config(image="")
-        btn_abrir.config(state=tk.DISABLED)
-        btn_borrar.config(state=tk.DISABLED)
+        _actualizar_botones_seleccion()   # ya no hay selección: los tres off
+
+
+def _preguntar_lanzadores() -> None:
+    """Ofrece crear los .desktop de las apps que no salen en el menú.
+
+    Se pregunta una sola vez por sesión (si el usuario dice que no, en
+    los siguientes Refresh no se insiste). El aviso también queda en el
+    detalle de cada app («Menu launcher: none»).
+    """
+    global _preguntado_lanzadores
+    pendientes = [app for app in aplicaciones
+                  if es_aplicacion(app) and app.lanzador is None]
+    if not pendientes or _preguntado_lanzadores:
+        return
+    _preguntado_lanzadores = True
+
+    nombres = "\n".join(f"    {app.nombre}" for app in pendientes[:6])
+    if len(pendientes) > 6:
+        nombres += f"\n    … and {len(pendientes) - 6} more"
+    respuesta = messagebox.askyesno(
+        "Missing menu launchers",
+        f"These applications are not in the applications menu:\n\n"
+        f"{nombres}\n\n"
+        "Create launchers for them now?\n"
+        f"(They are created in {DIR_LANZADORES})",
+    )
+    if not respuesta:
+        _poner_mensaje(etiquetaConfir,
+                       f"⚠ {len(pendientes)} app(s) not in the menu")
+        return
+
+    _bloquear_botones(True)
+    _poner_mensaje(etiquetaConfir,
+                   f"⏳ Creating {len(pendientes)} launcher(s) ...")
+    _en_hilo(lambda: _trabajo_crear_lanzadores(pendientes), _lanzadores_creados)
+
+
+def _lanzadores_creados(mensaje: str, exito: bool) -> None:
+    _bloquear_botones(False)
+    if exito:
+        app = _app_seleccionada()
+        if app is not None:
+            etiqueta_detalles.config(text=texto_detalles(app))
+    _actualizar_botones_seleccion()
+    _poner_mensaje(etiquetaConfir, mensaje)
 
 
 # ============================================================
@@ -579,7 +985,8 @@ def _scroll_lista(*argumentos: str | int) -> None:
 def crear_ventana() -> None:
     """Construye la interfaz y entra en el bucle principal."""
     global ventana, lista, etiqueta_detalles, etiqueta_icono
-    global etiquetaConfir, boton, btn_abrir, btn_borrar, logo, logo_cabecera
+    global etiquetaConfir, boton, btn_abrir, btn_ejecutar, btn_borrar
+    global logo, logo_cabecera
 
     ventana = tk.Tk()
     ventana.title("OPT APP MANAGER")
@@ -610,6 +1017,9 @@ def crear_ventana() -> None:
     btn_abrir = _boton(barra, "Open folder", abrir_carpeta, primario=False)
     btn_abrir.pack(side=tk.LEFT, padx=(8, 0))
     btn_abrir.config(state=tk.DISABLED)
+    btn_ejecutar = _boton(barra, "Execute", ejecutar, primario=False)
+    btn_ejecutar.pack(side=tk.LEFT, padx=(8, 0))
+    btn_ejecutar.config(state=tk.DISABLED)
     btn_borrar = _boton(barra, "Delete", borrar, peligro=True)
     btn_borrar.pack(side=tk.LEFT, padx=(8, 0))
     btn_borrar.config(state=tk.DISABLED)
